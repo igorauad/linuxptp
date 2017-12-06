@@ -109,6 +109,7 @@ static inline int64_t tmv_to_nanoseconds(tmv_t x)
 	return x.ns;
 }
 
+// IGOR: See 5.3.2 TimeInterval in IEEE 1588
 static inline TimeInterval tmv_to_TimeInterval(tmv_t x)
 {
 	return x.ns << 16;

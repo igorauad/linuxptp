@@ -128,6 +128,9 @@ tmv_t get_raw_delay(struct tsproc *tsp)
 	/* delay = ((t2 - t3) * rr + (t4 - t1)) / 2 */
 
 	t23 = tmv_sub(tsp->t2, tsp->t3);
+	// IGOR: This rate ratio is apparently only
+	// implemented by the "linreg" servo. For the others,
+	// clock_rate_ratio = 1.0
 	if (tsp->clock_rate_ratio != 1.0)
 		t23 = dbl_tmv(tmv_dbl(t23) * tsp->clock_rate_ratio);
 	t41 = tmv_sub(tsp->t4, tsp->t1);

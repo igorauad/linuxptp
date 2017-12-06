@@ -519,6 +519,15 @@ static int clock_management_set(struct clock *c, struct port *p,
 	return respond ? 1 : 0;
 }
 
+/*
+ * IGOR: prints the following statistics:
+ * - Time offset RMS
+ * - Max Abs Time Offset
+ * - Mean freq offset estimation (ppb)
+ * - Standard deviation of the freq offset estimation (ppb)
+ * - Mean delay estimation
+ * - Standard deviation of the delay estimation
+ */
 static void clock_stats_update(struct clock_stats *s,
 			       double offset, double freq)
 {
@@ -1626,6 +1635,9 @@ int clock_switch_phc(struct clock *c, int phc_index)
 	return 0;
 }
 
+/*
+ * IGOR: Gets t2 in "ingress" and t1 corrected by correction field in "origin"
+ */
 enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 {
 	double adj, weight;
@@ -1633,8 +1645,33 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 
 	c->ingress_ts = ingress;
 
+	/*
+	 * IGOR: set t1 and t2 in c->tsproc ( a struct containing the timestamps
+	 * configurations regarding their processing)
+	 */
 	tsproc_down_ts(c->tsproc, origin, ingress);
 
+	/*
+	 * IGOR: pass c->master_offset by reference and set it to "= t2 - t1 -
+	 * delay" Note at this point, function "clock_path_delay" was already called
+	 * in the "process_delay_resp" routine to update the path delay estimation
+	 * via "tsproc_update_delay". Furthermore, if delay filtering is enabled,
+	 * the latter ("tsproc_update_delay") also called the appropriate filter
+	 * function to ideally come up with a better delay estimation. Ultimately,
+	 * the delay estimation is stored in c->cur.meanPathDelay and if filtering
+	 * is enabled, also in tsp->filtered_delay. The latter is the one used in
+	 * tsproc_update_offset (again, if filtering is enabled). Note also the
+	 * distinction between our implementation and linuxptp. The delay is the one
+	 * who is filtered. Skew is estimated similar to our implementation, but its
+	 * output (the current skew estimation) is fed into a digital controller
+	 * (e.g. PI) scheme (see Abubakari's thesis) within a servo. Another point
+	 * to observe is that the frequency in which delayreq/resp messages are
+	 * exchanged can be different (e.g. lower) than the frequency in which SYNC
+	 * messages are sent. Thus, the routines in the sequel in fact use the last
+	 * "delay estimation" from the last received delayresp. Next, update_offset
+	 * is called to update the estimation of the "offset from master", using the
+	 * delay estimation from "tsproc_update_delay".
+	 */
 	if (tsproc_update_offset(c->tsproc, &c->master_offset, &weight)) {
 		if (c->free_running) {
 			return clock_no_adjust(c, ingress, origin);
@@ -1647,16 +1684,30 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 		return c->servo_state;
 	}
 
+	// IGOR: Store the offset from master
 	c->cur.offsetFromMaster = tmv_to_TimeInterval(c->master_offset);
 
 	if (c->free_running) {
 		return clock_no_adjust(c, ingress, origin);
 	}
 
+	// IGOR: Compute frequency adjustment
+	// servo_sample passes only the current time offset and the ingress
+	// timestamp (t2). With this information, the first stage of the
+	// servo maps this into a skew estimation. This skew estimation,
+	// then, feeds a PI controller, whose output (a filtered skew) is
+	// mapped into a new time reference by the "plant" block.
+	// 	Note also that "adj" gets the returned ppb offset.
 	adj = servo_sample(c->servo, tmv_to_nanoseconds(c->master_offset),
 			   tmv_to_nanoseconds(ingress), weight, &state);
+	// IGOR: Update servo controller state
 	c->servo_state = state;
 
+	/*
+	 * IGOR: Print results or summary of results
+	 * max_count holds the number of iterations in which a summary
+	 * is printed. If < 1, summary is not enabled.
+	 */
 	if (c->stats.max_count > 1) {
 		clock_stats_update(&c->stats, tmv_dbl(c->master_offset), adj);
 	} else {
@@ -1666,12 +1717,20 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 			tmv_to_nanoseconds(c->path_delay));
 	}
 
+	/* IGOR: The implementation of clock_rate_ratio depends on the
+	 * particular servo. For PI, it is not implemented. Therefore,
+	 * the ratio is always "1.0"
+	 */
 	tsproc_set_clock_rate_ratio(c->tsproc, clock_rate_ratio(c));
 
 	switch (state) {
 	case SERVO_UNLOCKED:
 		break;
 	case SERVO_JUMP:
+	/*
+	 * IGOR: In the jump state, the "offset from master" is directly
+	 * changed in the clock (counter).
+	 */
 		clockadj_set_freq(c->clkid, -adj);
 		clockadj_step(c->clkid, -tmv_to_nanoseconds(c->master_offset));
 		c->ingress_ts = tmv_zero();

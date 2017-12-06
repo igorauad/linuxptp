@@ -62,12 +62,15 @@ static void pi_destroy(struct servo *servo)
 }
 
 static double pi_sample(struct servo *servo,
-			int64_t offset,
-			uint64_t local_ts,
+			int64_t offset,    // IGOR: gets "master_offset"
+			uint64_t local_ts, // IGOR: gets ingress time (timestamp t2)
 			double weight,
 			enum servo_state *state)
 {
 	struct pi_servo *s = container_of(servo, struct pi_servo, servo);
+	// IGOR: Note, in order to always have something to print, when the
+	// servo is in the unlocked state, ppb (the drift) actually prints
+	// the current frequency estimation.
 	double ki_term, ppb = s->last_freq;
 	double freq_est_interval, localdiff;
 
@@ -90,8 +93,8 @@ static double pi_sample(struct servo *servo,
 		}
 
 		/* Wait long enough before estimating the frequency offset. */
-		localdiff = (s->local[1] - s->local[0]) / 1e9;
-		localdiff += localdiff * FREQ_EST_MARGIN;
+		localdiff = (s->local[1] - s->local[0]) / 1e9; // IGOR: difference in seconds
+		localdiff += localdiff * FREQ_EST_MARGIN; // IGOR: Adds + 0.1% as margin
 		freq_est_interval = 0.016 / s->ki;
 		if (freq_est_interval > 1000.0) {
 			freq_est_interval = 1000.0;
@@ -104,12 +107,37 @@ static double pi_sample(struct servo *servo,
 		/* Adjust drift by the measured frequency offset. */
 		s->drift += (1e9 - s->drift) * (s->offset[1] - s->offset[0]) /
 						(s->local[1] - s->local[0]);
+		/*
+		 * IGOR:
+		 * s->drift stores the drift in ppb, which is essentially a cumsum
+		 * of the instantaneous freq. offsets. Details in
+		 * github.com/richardcochran/linuxptp-as/commit/2ca067dcace97e1b5c28f1da3755b9d33f02bf0b
+		 * A discussion about this implementation can be found in:
+		 * linuxptp-devel.narkive.com/jcrIBJE1/patch-fix-drift-calculation-in-pi-servo-with-large-values
+		 * IGOR: consider also that the "s->drift" term in (1e9 - s->drift)
+		 * has very small contribution, since it multiples something the
+		 * fractional frequency offset (which should be very small). In
+		 * contrast, the "1e9" converts to ppb, so it is significant.
+		 */
 
+		// IGOR: Limit the drift
 		if (s->drift < -servo->max_frequency)
 			s->drift = -servo->max_frequency;
 		else if (s->drift > servo->max_frequency)
 			s->drift = servo->max_frequency;
 
+		/* IGOR
+		 * If the current iteration is the first update ever made (i.e.
+		 * the first time that the servo leaves the SERVO_UNLOCKED state),
+		 * then check to see if the "offset from master" is not beyond
+		 * acceptable limits, that is, the limits within which a frequency
+		 * adjustment can correct.
+		 * 	If the offset is in fact above these limits, then go to the JUMP
+		 * state, where the clock will be stepped. Nonetheless, note that the
+		 * drift is still corrected, since the ppb value is returned. The
+		 * difference is that, besides the freq correction itself, the clock
+		 * is also stepped.
+		 */
 		if ((servo->first_update &&
 		     servo->first_step_threshold &&
 		     servo->first_step_threshold < llabs(offset)) ||
@@ -130,15 +158,33 @@ static double pi_sample(struct servo *servo,
 		 * immediately. This allows re-calculating drift as in initial
 		 * clock startup.
 		 */
+		/* IGOR:
+		 *	To put differently, if the current "master offset" is greater
+		 * than a threshold, no frequency adjustment is attempted, from the
+		 * rationale that it is too big to correct via frequency. The servo,
+		 * then, goes back to the UNLOCKED state to reinitiate the state
+		 * machie. In the outside world where "pi_sample" is called, the
+		 * clock jump (step) will occurr right after coming through this case
+		 * 2, since there the state is still SERVO_JUMP. Then, in the next
+		 * iteration, the process begins back from the UNLOCKED state.
+		 */
 		if (servo->step_threshold &&
 		    servo->step_threshold < llabs(offset)) {
 			*state = SERVO_UNLOCKED;
 			s->count = 0;
 			break;
 		}
-
+		/*
+		* IGOR:
+		* Note the difference from Hamza Abubakari's paper. There, a
+		* cascade skew estimator precedes the PI controller, which implies
+		* that the input to the PI controller is the skew estimation. Here,
+		* the input to the PI controller is directly the "offset from master"
+		* as described in Cochran's paper.
+		*/
 		ki_term = s->ki * offset * weight;
 		ppb = s->kp * offset * weight + s->drift + ki_term;
+		// IGOR: Limit the ppb correction (saturation filter)
 		if (ppb < -servo->max_frequency) {
 			ppb = -servo->max_frequency;
 		} else if (ppb > servo->max_frequency) {
@@ -146,6 +192,7 @@ static double pi_sample(struct servo *servo,
 		} else {
 			s->drift += ki_term;
 		}
+		// IGOR: Keep locked (s->count maintained in 2)
 		*state = SERVO_LOCKED;
 		break;
 	}
@@ -156,8 +203,11 @@ static double pi_sample(struct servo *servo,
 
 static void pi_sync_interval(struct servo *servo, double interval)
 {
+	//IGOR: interval comes from "logSyncInterval" in the cfg
+
 	struct pi_servo *s = container_of(servo, struct pi_servo, servo);
 
+	// IGOR: configured_pi_kp_scale default is 0.0
 	s->kp = s->configured_pi_kp_scale * pow(interval, s->configured_pi_kp_exponent);
 	if (s->kp > s->configured_pi_kp_norm_max / interval)
 		s->kp = s->configured_pi_kp_norm_max / interval;

@@ -192,13 +192,16 @@ int set_tmo_log(int fd, unsigned int scale, int log_seconds)
 	int i;
 
 	if (log_seconds < 0) {
-
+		// IGOR: Change to positive
 		log_seconds *= -1;
+
+		// IGOR: Divide the number of ns by half until
 		for (i = 1, ns = scale * 500000000ULL; i < log_seconds; i++) {
 			ns >>= 1;
 		}
 		tmo.it_value.tv_nsec = ns;
 
+		// IGOR: Find integer seconds
 		while (tmo.it_value.tv_nsec >= NS_PER_SEC) {
 			tmo.it_value.tv_nsec -= NS_PER_SEC;
 			tmo.it_value.tv_sec++;
