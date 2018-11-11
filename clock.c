@@ -1652,8 +1652,8 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 	tsproc_down_ts(c->tsproc, origin, ingress);
 
 	/*
-	 * IGOR: pass c->master_offset by reference and set it to "= t2 - t1 -
-	 * delay" Note at this point, function "clock_path_delay" was already called
+	 * IGOR: pass c->master_offset by reference and set it to "= t2 - (t1 -
+	 * delay)" Note at this point, function "clock_path_delay" was already called
 	 * in the "process_delay_resp" routine to update the path delay estimation
 	 * via "tsproc_update_delay". Furthermore, if delay filtering is enabled,
 	 * the latter ("tsproc_update_delay") also called the appropriate filter
@@ -1697,7 +1697,7 @@ enum servo_state clock_synchronize(struct clock *c, tmv_t ingress, tmv_t origin)
 	// servo maps this into a skew estimation. This skew estimation,
 	// then, feeds a PI controller, whose output (a filtered skew) is
 	// mapped into a new time reference by the "plant" block.
-	// 	Note also that "adj" gets the returned ppb offset.
+	// 	Note also that "adj" gets the returned (cumulative) ppb offset.
 	adj = servo_sample(c->servo, tmv_to_nanoseconds(c->master_offset),
 			   tmv_to_nanoseconds(ingress), weight, &state);
 	// IGOR: Update servo controller state

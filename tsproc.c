@@ -102,12 +102,14 @@ void tsproc_down_ts(struct tsproc *tsp, tmv_t remote_ts, tmv_t local_ts)
 {
 	tsp->t1 = remote_ts;
 	tsp->t2 = local_ts;
+	pr_debug("t1 %10" PRId64 "t2 %10" PRId64, remote_ts, local_ts);
 }
 
 void tsproc_up_ts(struct tsproc *tsp, tmv_t local_ts, tmv_t remote_ts)
 {
 	tsp->t3 = local_ts;
 	tsp->t4 = remote_ts;
+	pr_debug("t3 %10" PRId64 "t4 %10" PRId64, local_ts, remote_ts);
 }
 
 void tsproc_set_clock_rate_ratio(struct tsproc *tsp, double clock_rate_ratio)
@@ -212,9 +214,15 @@ int tsproc_update_offset(struct tsproc *tsp, tmv_t *offset, double *weight)
 		break;
 	}
 
-	/* offset = t2 - t1 - delay */
+	/* "offset" is the offset from master in its definition:
+	 * 		offset = t2 - t1 - delay
+	 * where t2-t1 is the measured m2s delay and delay is the
+	 * (raw or filtered) one-way propagation delay estimation.
+	 */
 	*offset = tmv_sub(tmv_sub(tsp->t2, tsp->t1), delay);
 
+    /* store a weight factor, which describes by how much the filtered
+	delay is larger than the raw instantaneous delay */
 	if (!weight)
 		return 0;
 
