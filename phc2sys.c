@@ -515,6 +515,12 @@ static void reconfigure(struct node *node)
 	pr_info("selecting %s as the master clock", src->device);
 }
 
+/* IGOR:
+ *
+ * Return in ts the sysclk timestamp corresponding to the quickest read and the
+ * offset also in this quickest read computed by the difference between clkid
+ * and sysclk.
+ */
 static int read_phc(clockid_t clkid, clockid_t sysclk, int readings,
 		    int64_t *offset, uint64_t *ts, int64_t *delay)
 {
@@ -654,6 +660,13 @@ static void enable_pps_output(clockid_t src)
 		pr_warning("failed to enable PPS output");
 }
 
+/*
+ * IGOR
+ *
+ * @param int64 *offset: the offset between the kernel time and the PPS
+ *                       reference, in terms of nanoseconds.
+ * @param uint64 *ts: the kernel timestamp (coming with the PPS event)
+ */
 static int read_pps(int fd, int64_t *offset, uint64_t *ts)
 {
 	struct pps_fdata pfd;
@@ -669,6 +682,23 @@ static int read_pps(int fd, int64_t *offset, uint64_t *ts)
 	*ts = pfd.info.assert_tu.sec * NS_PER_SEC;
 	*ts += pfd.info.assert_tu.nsec;
 
+	/*
+	 * IGOR:
+	 *
+	 * We know that the PPS event occurs when ns count is 0. Hence, the offset
+	 * here is equal to whatever the ns part of the timestamp is. Note that, it
+	 * is implied that the timestamp comes from CLOCK_REALTIME. That is, while
+	 * the PPS event comes from the master clock, the PPS timestamp comes from
+	 * the slave (since CLOCK_REALTIME is necessarily the slave when PPS is
+	 * used).
+	 *
+	 * The offset is computed as:
+	 *
+	 *    offset = slave - master
+	 *
+	 * Since it is based on on ns alone, when ns is higher than half a second it
+	 * is more likely that the offset is negative instead.
+	 */
 	*offset = *ts % NS_PER_SEC;
 	if (*offset > NS_PER_SEC / 2)
 		*offset -= NS_PER_SEC;
@@ -676,6 +706,13 @@ static int read_pps(int fd, int64_t *offset, uint64_t *ts)
 	return 1;
 }
 
+/*
+ * IGOR:
+ *
+ * @param struct node *node: the struct containing phc2sys configs
+ * @param *clock: the destination (client) clock
+ * @param int fd: the PPS char device file descriptor
+ */
 static int do_pps_loop(struct node *node, struct clock *clock, int fd)
 {
 	int64_t pps_offset, phc_offset, phc_delay;
@@ -699,11 +736,43 @@ static int do_pps_loop(struct node *node, struct clock *clock, int fd)
 		/* If a PHC is available, use it to get the whole number
 		   of seconds in the offset and PPS for the rest. */
 		if (src != CLOCK_INVALID) {
+			/*
+			 * IGOR:
+			 *
+			 * Read both master and slave time (src is master and clock->clkid
+			 * is the slave - kernel time)
+			 *
+			 * The "phc_ts" will hold the timestamp that comes from
+			 * clock->clkid, namely kernel time. The phc_offset is the offset
+			 * between clock->clkid (slave) and src (master time), computed as:
+			 *
+			 *   offset = clock->clkid (slave) - src (master)
+			 *
+			 * If the offset is subtracted from phc_ts, we have:
+			 *
+			 *  phc_ts - phc_offset = slave - (slave - master)
+			 *                      = master
+			 *                      = src
+			 *
+			 * Note, however, that phc_offset and phc_ts are computed based on
+			 * different instants of clock->clkid, so there is an uncertainty
+			 * introduced in this step. This uncertatinty is ultimately not a
+			 * problem because the only thing that is pursued here is the whole
+			 * seconds count of the master, not its nanoseconds. This is
+			 * achieved via rounding below.
+			 */
 			if (!read_phc(src, clock->clkid, node->phc_readings,
 				      &phc_offset, &phc_ts, &phc_delay))
 				return -1;
 
-			/* Convert the time stamp to the PHC time. */
+			/*
+			 * IGOR:
+			 *
+			 * Convert the time stamp to the master PHC time, namely the time of
+			 * the PPS source. This is necessary, since the PPS event does not
+			 * bring any indication of the PPS source time, except that its
+			 * second is incrementing.
+			 */
 			phc_ts -= phc_offset;
 
 			/* Check if it is close to the start of the second. */
@@ -713,7 +782,27 @@ static int do_pps_loop(struct node *node, struct clock *clock, int fd)
 				continue;
 			}
 
+			/*
+			 * IGOR:
+			 *
+			 * Obtain the time of the PPS source in terms of whole seconds. Once
+			 * again, the rationale is that the nanoseconds count should be zero
+			 * on a PPS rising edge, so the time should be zero.
+			 */
 			phc_ts = phc_ts / NS_PER_SEC * NS_PER_SEC;
+
+			/*
+			 * IGOR:
+			 *
+			 * Note again that the PPS timestamp ("pps_ts") is actually the
+			 * "slave" timestamp here, namely kernel time, due to how it is
+			 * implemented in "ptp_clock.c" (in the kernel) for event
+			 * PTP_CLOCK_PPS. Meanwhile, phc_ts below is the master time (with a
+			 * whole number of seconds and zero nanoseconds), namely the time of
+			 * the PHC that is producing the PPS and playing the role of the
+			 * master clock for phc2sys. So this really is about synchronising
+			 * kernel time.
+			 */
 			pps_offset = pps_ts - phc_ts;
 		}
 
